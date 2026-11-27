@@ -6,7 +6,8 @@ import {
   caravanaDesdeQR, validarRegistro, type Etapa, type Resultado
 } from "./reglas";
 import { exportarExcel, leerHistorialExcel } from "./datalake";
-import { MODO_DEMO } from "./sync";
+import { modoDemo, sincronizar, bajarHistoria } from "./sync";
+import { iniciarAuth, cuenta, entrar, salir } from "./auth";
 import { Escaner } from "./Escaner";
 
 type Vista = { tipo: "inicio" } | { tipo: "carga"; sesionId: string; editarId?: string } | { tipo: "lista"; sesionId: string };
@@ -15,17 +16,48 @@ export default function App() {
   const [vista, setVista] = useState<Vista>({ tipo: "inicio" });
   const online = useOnline();
   const pendientes = useLiveQuery(() => db.registros.where("estado").equals("pendiente").count(), [], 0);
+  const [usuario, setUsuario] = useState<string | null>(null);
+  const [authListo, setAuthListo] = useState(false);
+  const [sync, setSync] = useState("");
+
+  useEffect(() => {
+    iniciarAuth().then(() => setUsuario(cuenta()?.name || cuenta()?.username || null)).catch(() => {}).finally(() => setAuthListo(true));
+  }, []);
+
+  // Sincroniza al volver la señal, al iniciar sesión y cada minuto si hay pendientes.
+  const subir = useCallback(async () => {
+    if (modoDemo() || !navigator.onLine) return;
+    try {
+      const r = await sincronizar();
+      setSync(r.fallidos ? `${r.fallidos} sin subir por error` : r.enviados ? `Subidos ${r.enviados}` : "");
+    } catch (e) { setSync((e as Error).message); }
+  }, []);
+  useEffect(() => { if (online && usuario) subir(); }, [online, usuario, subir]);
+  useEffect(() => { const t = setInterval(subir, 60000); return () => clearInterval(t); }, [subir]);
+  const demo = authListo && modoDemo();
 
   return (
     <div className="app">
       <header className="barra">
         <button className="titulo" onClick={() => setVista({ tipo: "inicio" })}>RCC Carga</button>
         <span className={"pill " + (online ? "ok" : "off")}>{online ? "Con señal" : "Sin señal"}</span>
-        <span className="pill">{pendientes} sin subir</span>
+        <button className="pill" onClick={subir} disabled={demo}>{pendientes} sin subir</button>
       </header>
-      {MODO_DEMO && <div className="demo">Modo demo: los datos quedan en este teléfono y se exportan a Excel.</div>}
+      {demo && (
+        <div className="demo">
+          Modo demo: los datos quedan en este teléfono y se exportan a Excel.{" "}
+          {online && window.self === window.top && <button className="link" onClick={() => entrar()}>Entrar con Microsoft</button>}
+        </div>
+      )}
+      {!demo && usuario && (
+        <div className="cuenta">
+          <span>{usuario}</span>
+          {sync && <span>{sync}</span>}
+          <button className="link" onClick={() => salir()}>Salir</button>
+        </div>
+      )}
       <main>
-        {vista.tipo === "inicio" && <Inicio onAbrir={(id, a) => setVista(a === "lista" ? { tipo: "lista", sesionId: id } : { tipo: "carga", sesionId: id })} />}
+        {vista.tipo === "inicio" && <Inicio usuario={usuario} onAbrir={(id, a) => setVista(a === "lista" ? { tipo: "lista", sesionId: id } : { tipo: "carga", sesionId: id })} />}
         {vista.tipo === "carga" && (
           <Carga
             key={vista.editarId || "nuevo"}
@@ -34,6 +66,7 @@ export default function App() {
             onLista={() => setVista({ tipo: "lista", sesionId: vista.sesionId })}
             onEditar={id => setVista({ tipo: "carga", sesionId: vista.sesionId, editarId: id })}
             onNuevo={() => setVista({ tipo: "carga", sesionId: vista.sesionId })}
+            onGuardado={subir}
           />
         )}
         {vista.tipo === "lista" && (
@@ -42,6 +75,7 @@ export default function App() {
             onCargar={() => setVista({ tipo: "carga", sesionId: vista.sesionId })}
             onEditar={id => setVista({ tipo: "carga", sesionId: vista.sesionId, editarId: id })}
             onSalir={() => setVista({ tipo: "inicio" })}
+            onCambio={subir}
           />
         )}
       </main>
@@ -51,16 +85,18 @@ export default function App() {
 
 // ---------------- Inicio: abrir una sesión de medición ----------------
 
-function Inicio({ onAbrir }: { onAbrir: (sesionId: string, a: "carga" | "lista") => void }) {
+function Inicio({ onAbrir, usuario }: { onAbrir: (sesionId: string, a: "carga" | "lista") => void; usuario: string | null }) {
   const [cliente, setCliente] = useState(() => leer("cliente") || "");
   const [operario, setOperario] = useState(() => leer("operario") || "");
+  const [bajando, setBajando] = useState(false);
+  useEffect(() => { if (usuario && !operario) setOperario(usuario); }, [usuario]); // eslint-disable-line
   const [etapa, setEtapa] = useState<Etapa | "">("");
   const [fecha, setFecha] = useState(hoyISO());
   const [msg, setMsg] = useState("");
   const sesiones = useLiveQuery(() => db.sesiones.orderBy("creadaEn").reverse().limit(10).toArray(), [], []);
   const conteos = useLiveQuery(async () => {
     const m: Record<string, number> = {};
-    for (const r of await db.registros.toArray()) m[r.sesionId] = (m[r.sesionId] || 0) + 1;
+    for (const r of await db.registros.filter(x => !x.anulado).toArray()) m[r.sesionId] = (m[r.sesionId] || 0) + 1;
     return m;
   }, [], {} as Record<string, number>);
   const nHist = useLiveQuery(() => (cliente ? db.historial.where("cliente").equals(cliente).count() : 0), [cliente], 0);
@@ -75,7 +111,18 @@ function Inicio({ onAbrir }: { onAbrir: (sesionId: string, a: "carga" | "lista")
     guardar("operario", operario.trim());
     const s: Sesion = { id: nuevoId(), cliente, etapa: etapa as Etapa, fecha, operario: operario.trim(), creadaEn: new Date().toISOString() };
     await db.sesiones.add(s);
+    if (!modoDemo() && navigator.onLine) bajar(); // refresca la historia sin frenar la carga
     onAbrir(s.id, "carga");
+  }
+
+  async function bajar() {
+    if (!cliente) return;
+    setBajando(true);
+    try {
+      const r = await bajarHistoria(cliente);
+      setMsg(`Historia de ${cliente} actualizada: ${r.dataLake} registros del Data Lake y ${r.entrada} de otros teléfonos.`);
+    } catch (e) { setMsg(`No se pudo bajar la historia: ${(e as Error).message}`); }
+    finally { setBajando(false); }
   }
 
   async function importar(f: File) {
@@ -122,7 +169,9 @@ function Inicio({ onAbrir }: { onAbrir: (sesionId: string, a: "carga" | "lista")
       {cliente && (
         <p className="nota">
           {nHist ? `Hay ${nHist} registros de historia de ${cliente} para precargar paridades y detectar duplicados.` : `Sin historia de ${cliente} en este teléfono.`}{" "}
-          <button className="link" onClick={() => archivo.current?.click()}>Cargar historia desde un Excel del Data Lake</button>
+          {!modoDemo()
+            ? <button className="link" disabled={bajando} onClick={bajar}>{bajando ? "Bajando…" : "Actualizar historia desde SharePoint"}</button>
+            : <button className="link" onClick={() => archivo.current?.click()}>Cargar historia desde un Excel del Data Lake</button>}
           <input ref={archivo} type="file" accept=".xlsx,.xls" hidden onChange={e => e.target.files?.[0] && importar(e.target.files[0])} />
         </p>
       )}
@@ -149,11 +198,11 @@ function Inicio({ onAbrir }: { onAbrir: (sesionId: string, a: "carga" | "lista")
 
 // ---------------- Carga: una cerda por pantalla ----------------
 
-function Carga({ sesionId, editarId, onLista, onEditar, onNuevo }: {
-  sesionId: string; editarId?: string; onLista: () => void; onEditar: (id: string) => void; onNuevo: () => void;
+function Carga({ sesionId, editarId, onLista, onEditar, onNuevo, onGuardado }: {
+  sesionId: string; editarId?: string; onLista: () => void; onEditar: (id: string) => void; onNuevo: () => void; onGuardado: () => void;
 }) {
   const sesion = useLiveQuery(() => db.sesiones.get(sesionId), [sesionId]);
-  const cargadas = useLiveQuery(() => db.registros.where("sesionId").equals(sesionId).count(), [sesionId], 0);
+  const cargadas = useLiveQuery(() => db.registros.where("sesionId").equals(sesionId).filter(r => !r.anulado).count(), [sesionId], 0);
   const [caravana, setCaravana] = useState("");
   const [paridad, setParidad] = useState("");
   const [medicion, setMedicion] = useState("");
@@ -241,10 +290,12 @@ function Carga({ sesionId, editarId, onLista, onEditar, onNuevo }: {
       editadoEn: previo ? ahora : undefined,
       operario: sesion!.operario,
       origen,
-      estado: "pendiente"
+      estado: "pendiente",
+      spItemId: previo?.spItemId
     };
     await db.registros.put(reg);
     navigator.vibrate?.(40);
+    onGuardado();
     if (editarId) { onLista(); return; }
     setHecho(`Guardada ${reg.caravana}: paridad ${reg.paridad}, medición ${reg.medicion}.`);
     idRef.current = nuevoId();
@@ -318,17 +369,20 @@ function Carga({ sesionId, editarId, onLista, onEditar, onNuevo }: {
 
 // ---------------- Lista de la sesión ----------------
 
-function Lista({ sesionId, onCargar, onEditar, onSalir }: { sesionId: string; onCargar: () => void; onEditar: (id: string) => void; onSalir: () => void }) {
+function Lista({ sesionId, onCargar, onEditar, onSalir, onCambio }: { sesionId: string; onCargar: () => void; onEditar: (id: string) => void; onSalir: () => void; onCambio: () => void }) {
   const sesion = useLiveQuery(() => db.sesiones.get(sesionId), [sesionId]);
-  const regs = useLiveQuery(() => db.registros.where("sesionId").equals(sesionId).toArray(), [sesionId], []);
+  const regs = useLiveQuery(() => db.registros.where("sesionId").equals(sesionId).filter(r => !r.anulado).toArray(), [sesionId], []);
+  const [aBorrar, setABorrar] = useState<string | null>(null);
   const ordenados = useMemo(() => [...regs].sort((a, b) => (a.cargadoEn < b.cargadoEn ? 1 : -1)), [regs]);
   if (!sesion) return <p>Cargando…</p>;
 
-  const [aBorrar, setABorrar] = useState<string | null>(null);
   async function borrar(r: Registro) {
     if (aBorrar !== r.id) { setABorrar(r.id); return; } // segundo toque confirma
-    await db.registros.delete(r.id);
+    // Si ya se subió, se marca anulado y se avisa a la Lista; si no, se borra del teléfono.
+    if (r.spItemId) await db.registros.update(r.id, { anulado: true, estado: "pendiente" });
+    else await db.registros.delete(r.id);
     setABorrar(null);
+    onCambio();
   }
 
   return (
@@ -352,7 +406,12 @@ function Lista({ sesionId, onCargar, onEditar, onSalir }: { sesionId: string; on
         <tbody>
           {ordenados.map(r => (
             <tr key={r.id}>
-              <td>{r.caravana}{r.origen === "qr" && <span className="tag">QR</span>}</td>
+              <td>
+                {r.caravana}{r.origen === "qr" && <span className="tag">QR</span>}
+                <span className={"estado " + (r.errorSync ? "err" : r.estado)} title={r.errorSync || ""}>
+                  {r.errorSync ? "Error al subir" : r.estado === "sincronizado" ? "Subido" : "Sin subir"}
+                </span>
+              </td>
               <td>{r.paridad}</td>
               <td>{r.medicion}</td>
               <td className="der">
