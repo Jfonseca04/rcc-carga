@@ -10,6 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@azure/msal-browser": "^3.27.0",
     "dexie": "4.0.8",
     "dexie-react-hooks": "1.1.7",
     "jsqr": "1.4.0",

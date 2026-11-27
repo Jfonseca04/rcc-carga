@@ -69,3 +69,10 @@ input:focus, select:focus { outline: none; border-color: var(--verde); }
 .escaner .mira { position: absolute; left: 50%; top: 42%; width: 60vw; max-width: 280px; aspect-ratio: 1; transform: translate(-50%, -50%);
   border: 3px solid #fff; border-radius: 16px; pointer-events: none; }
 .escaner .btn { margin-top: 16px; color: #fff; border-color: #fff; }
+.cuenta { display: flex; gap: 12px; align-items: center; font-size: 13px; color: var(--suave); padding: 8px 16px;
+  border-bottom: 1px solid var(--borde); }
+.cuenta span:first-child { flex: 1; color: var(--texto); font-weight: 600; }
+button.pill { border: 0; color: #fff; font: inherit; font-size: 12px; }
+.estado { display: block; font-size: 11px; color: var(--suave); }
+.estado.sincronizado { color: var(--verde); }
+.estado.err { color: var(--rojo); font-weight: 600; }

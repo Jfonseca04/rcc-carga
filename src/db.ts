@@ -19,6 +19,9 @@ export interface Registro {
   operario: string;
   origen: "qr" | "tipeado";
   estado: Estado;
+  spItemId?: string;     // id del ítem en la Lista "RCC Entrada" una vez enviado
+  anulado?: boolean;     // borrado después de enviado: se marca "Anulado" en la Lista
+  errorSync?: string;    // último error al enviar, para mostrarlo
 }
 
 export interface Sesion {
@@ -53,6 +56,12 @@ class BaseLocal extends Dexie {
       sesiones: "id, creadaEn",
       historial: "id, cliente, [cliente+caravana]"
     });
+    // v2: campos de sincronización (no cambian los índices)
+    this.version(2).stores({
+      registros: "id, sesionId, cliente, estado, [cliente+caravana], [cliente+semana+etapa]",
+      sesiones: "id, creadaEn",
+      historial: "id, cliente, [cliente+caravana]"
+    });
   }
 }
 
@@ -68,6 +77,7 @@ export async function conocidosDe(cliente: string) {
     db.registros.where("cliente").equals(cliente).toArray(),
     db.historial.where("cliente").equals(cliente).toArray()
   ]);
+  const vivos = locales.filter(r => !r.anulado);
   const ids = new Set(locales.map(r => r.id));
-  return [...locales, ...hist.filter(h => !ids.has(h.id))];
+  return [...vivos, ...hist.filter(h => !ids.has(h.id))];
 }
